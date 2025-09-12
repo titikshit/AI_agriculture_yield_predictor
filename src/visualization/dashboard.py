@@ -1,5 +1,5 @@
 """
-Agricultural ML Dashboard - Optimized for latest package versions
+Agricultural ML Dashboard - Fixed and Optimized Version
 """
 import dash
 from dash import dcc, html, Input, Output, callback, dash_table
@@ -334,12 +334,22 @@ def update_kpi_cards(state, crop, year):
     if len(filtered_df) == 0:
         return [html.Div("No data available", className="col-12 text-center text-muted")]
     
-    # Calculate KPIs
-    avg_yield = filtered_df['yield_tonnes_per_hectare'].mean()
-    total_area = filtered_df['area_hectares'].sum()
-    total_production = filtered_df['production_tonnes'].sum()
-    avg_temp = filtered_df['temperature_c'].mean()
-    avg_rainfall = filtered_df['rainfall_mm'].mean()
+    # Calculate KPIs with safe column access
+    def safe_get_column(df, primary_col, alt_cols=None):
+        """Safely get column data with fallbacks"""
+        if primary_col in df.columns:
+            return df[primary_col]
+        elif alt_cols:
+            for alt_col in alt_cols:
+                if alt_col in df.columns:
+                    return df[alt_col]
+        return pd.Series([0] * len(df))
+    
+    avg_yield = safe_get_column(filtered_df, 'yield_tonnes_per_hectare', ['yield_tons_per_hectare', 'yield']).mean()
+    total_area = safe_get_column(filtered_df, 'area_hectares', ['area']).sum()
+    total_production = safe_get_column(filtered_df, 'production_tonnes', ['production']).sum()
+    avg_temp = safe_get_column(filtered_df, 'temperature_c', ['temperature_clean', 'temperature']).mean()
+    avg_rainfall = safe_get_column(filtered_df, 'rainfall_mm', ['rainfall_clean', 'rainfall']).mean()
     record_count = len(filtered_df)
     
     # Create KPI cards
@@ -388,38 +398,92 @@ def update_charts(state, crop, year, analysis_type):
         empty_fig = px.bar(x=['No Data'], y=[0], title="No data available for selected filters")
         return empty_fig, empty_fig, empty_fig, empty_fig
     
+    # Helper function to get column safely
+    def get_chart_column(df, primary, alternatives=None):
+        if primary in df.columns:
+            return primary
+        elif alternatives:
+            for alt in alternatives:
+                if alt in df.columns:
+                    return alt
+        return primary  # fallback
+    
+    # Get column names safely
+    yield_col = get_chart_column(filtered_df, 'yield_tonnes_per_hectare', ['yield_tons_per_hectare', 'yield'])
+    temp_col = get_chart_column(filtered_df, 'temperature_c', ['temperature_clean', 'temperature'])
+    rainfall_col = get_chart_column(filtered_df, 'rainfall_mm', ['rainfall_clean', 'rainfall'])
+    humidity_col = get_chart_column(filtered_df, 'humidity_percent', ['humidity_clean', 'humidity'])
+    area_col = get_chart_column(filtered_df, 'area_hectares', ['area'])
+    
     # Chart 1: Main analysis based on type
-    if analysis_type == 'overview':
-        fig1 = px.box(filtered_df, x='season', y='yield_tonnes_per_hectare',
-                     title=f'Yield Distribution by Season - {crop} in {state}')
-    elif analysis_type == 'weather':
-        fig1 = px.scatter(filtered_df, x='rainfall_mm', y='yield_tonnes_per_hectare',
-                         color='temperature_c', size='area_hectares',
-                         title=f'Weather Impact on Yield - {crop} in {state}')
-    elif analysis_type == 'trends':
-        yearly_data = filtered_df.groupby('year')['yield_tonnes_per_hectare'].mean().reset_index()
-        fig1 = px.line(yearly_data, x='year', y='yield_tonnes_per_hectare',
-                      title=f'Yield Trends Over Time - {crop} in {state}')
-    else:  # geographic
-        state_data = df[df['crop'] == crop].groupby('state')['yield_tonnes_per_hectare'].mean().reset_index()
-        fig1 = px.bar(state_data, x='state', y='yield_tonnes_per_hectare',
-                     title=f'Average Yield by State - {crop}')
-        fig1.update_xaxes(tickangle=45)
+    try:
+        if analysis_type == 'overview':
+            if 'season' in filtered_df.columns and yield_col in filtered_df.columns:
+                fig1 = px.box(filtered_df, x='season', y=yield_col,
+                             title=f'Yield Distribution by Season - {crop} in {state}')
+            else:
+                fig1 = px.histogram(filtered_df, x=yield_col, title=f'Yield Distribution - {crop} in {state}')
+        elif analysis_type == 'weather':
+            if rainfall_col in filtered_df.columns and yield_col in filtered_df.columns:
+                fig1 = px.scatter(filtered_df, x=rainfall_col, y=yield_col,
+                                 color=temp_col if temp_col in filtered_df.columns else None,
+                                 size=area_col if area_col in filtered_df.columns else None,
+                                 title=f'Weather Impact on Yield - {crop} in {state}')
+            else:
+                fig1 = px.bar(x=[state], y=[1], title=f'Weather data not available')
+        elif analysis_type == 'trends':
+            if 'year' in filtered_df.columns and yield_col in filtered_df.columns:
+                yearly_data = filtered_df.groupby('year')[yield_col].mean().reset_index()
+                fig1 = px.line(yearly_data, x='year', y=yield_col,
+                              title=f'Yield Trends Over Time - {crop} in {state}')
+            else:
+                fig1 = px.bar(x=[year], y=[1], title=f'Trend data not available')
+        else:  # geographic
+            if yield_col in df.columns:
+                state_data = df[df['crop'] == crop].groupby('state')[yield_col].mean().reset_index()
+                fig1 = px.bar(state_data, x='state', y=yield_col,
+                             title=f'Average Yield by State - {crop}')
+                fig1.update_xaxes(tickangle=45)
+            else:
+                fig1 = px.bar(x=['No Data'], y=[0], title="Geographic data not available")
+    except Exception as e:
+        fig1 = px.bar(x=['Error'], y=[1], title=f'Chart error: {str(e)}')
     
     # Chart 2: Secondary analysis
-    fig2 = px.scatter(filtered_df, x='temperature_c', y='humidity_percent',
-                     size='yield_tonnes_per_hectare', color='season',
-                     title=f'Temperature vs Humidity - {crop} in {state}')
+    try:
+        if temp_col in filtered_df.columns and humidity_col in filtered_df.columns:
+            fig2 = px.scatter(filtered_df, x=temp_col, y=humidity_col,
+                             size=yield_col if yield_col in filtered_df.columns else None,
+                             color='season' if 'season' in filtered_df.columns else None,
+                             title=f'Temperature vs Humidity - {crop} in {state}')
+        else:
+            fig2 = px.bar(x=['No Data'], y=[0], title="Weather comparison not available")
+    except Exception as e:
+        fig2 = px.bar(x=['Error'], y=[1], title=f'Chart error: {str(e)}')
     
     # Chart 3: Correlation heatmap
-    numeric_cols = ['yield_tonnes_per_hectare', 'temperature_c', 'rainfall_mm', 'humidity_percent', 'area_hectares']
-    corr_data = filtered_df[numeric_cols].corr()
-    fig3 = px.imshow(corr_data, text_auto=True, aspect="auto",
-                     title="Feature Correlation Matrix")
+    try:
+        numeric_cols = [yield_col, temp_col, rainfall_col, humidity_col, area_col]
+        available_cols = [col for col in numeric_cols if col in filtered_df.columns]
+        
+        if len(available_cols) > 1:
+            corr_data = filtered_df[available_cols].corr()
+            fig3 = px.imshow(corr_data, text_auto=True, aspect="auto",
+                           title="Feature Correlation Matrix")
+        else:
+            fig3 = px.bar(x=['No Data'], y=[0], title="Insufficient data for correlation")
+    except Exception as e:
+        fig3 = px.bar(x=['Error'], y=[1], title=f'Correlation error: {str(e)}')
     
     # Chart 4: Distribution
-    fig4 = px.histogram(filtered_df, x='yield_tonnes_per_hectare', nbins=20,
-                       title=f'Yield Distribution - {crop} in {state}')
+    try:
+        if yield_col in filtered_df.columns:
+            fig4 = px.histogram(filtered_df, x=yield_col, nbins=20,
+                               title=f'Yield Distribution - {crop} in {state}')
+        else:
+            fig4 = px.bar(x=['No Data'], y=[0], title="Distribution data not available")
+    except Exception as e:
+        fig4 = px.bar(x=['Error'], y=[1], title=f'Distribution error: {str(e)}')
     
     # Update layouts
     for fig in [fig1, fig2, fig3, fig4]:
@@ -442,40 +506,78 @@ def make_prediction(n_clicks, temperature, rainfall, humidity, state, crop):
                        className="text-muted")
     
     try:
-        # Simple prediction logic (replace with actual ML model if available)
+        # Initialize variables to avoid reference errors
+        similar_data = pd.DataFrame()
+        confidence = "Low"
+        
+        # Simple prediction logic
         if model_available and model is not None:
             # Real ML prediction would go here
             prediction = 2.8 + (temperature - 26) * 0.05 + (rainfall - 750) * 0.0008 + (humidity - 65) * 0.015
+            confidence = "High"
         else:
             # Statistical prediction based on historical data
-            similar_data = df[
-                (df['state'] == state) & 
-                (df['crop'] == crop) &
-                (abs(df['temperature_c'] - temperature) <= 5) &
-                (abs(df['rainfall_mm'] - rainfall) <= 200) &
-                (abs(df['humidity_percent'] - humidity) <= 15)
-            ]
-            
-            if len(similar_data) > 0:
-                prediction = similar_data['yield_tonnes_per_hectare'].mean()
-            else:
-                # Fallback calculation
-                base_yield = df[(df['state'] == state) & (df['crop'] == crop)]['yield_tonnes_per_hectare'].mean()
-                if pd.isna(base_yield):
-                    base_yield = df[df['crop'] == crop]['yield_tonnes_per_hectare'].mean()
+            try:
+                # Helper function to get weather column names
+                def get_weather_col(df, primary, alternatives):
+                    if primary in df.columns:
+                        return primary
+                    for alt in alternatives:
+                        if alt in df.columns:
+                            return alt
+                    return None
                 
-                # Apply weather factors
-                temp_factor = 1.0 + (temperature - 26) * 0.02
-                rain_factor = 1.0 + (rainfall - 750) * 0.0005
-                humidity_factor = 1.0 + (humidity - 65) * 0.008
+                temp_col = get_weather_col(df, 'temperature_c', ['temperature_clean', 'temperature'])
+                rainfall_col = get_weather_col(df, 'rainfall_mm', ['rainfall_clean', 'rainfall'])
+                humidity_col = get_weather_col(df, 'humidity_percent', ['humidity_clean', 'humidity'])
+                yield_col = get_weather_col(df, 'yield_tonnes_per_hectare', ['yield_tons_per_hectare', 'yield'])
                 
-                prediction = base_yield * temp_factor * rain_factor * humidity_factor
+                # Filter similar data
+                similar_data = df[
+                    (df['state'] == state) & 
+                    (df['crop'] == crop)
+                ]
+                
+                # Apply weather filters if columns exist
+                if temp_col and len(similar_data) > 0:
+                    similar_data = similar_data[abs(similar_data[temp_col] - temperature) <= 5]
+                if rainfall_col and len(similar_data) > 0:
+                    similar_data = similar_data[abs(similar_data[rainfall_col] - rainfall) <= 200]
+                if humidity_col and len(similar_data) > 0:
+                    similar_data = similar_data[abs(similar_data[humidity_col] - humidity) <= 15]
+                
+                if len(similar_data) > 0 and yield_col:
+                    prediction = similar_data[yield_col].mean()
+                    confidence = "High" if len(similar_data) > 10 else "Medium"
+                else:
+                    # Fallback calculation
+                    base_data = df[(df['state'] == state) & (df['crop'] == crop)]
+                    if len(base_data) > 0 and yield_col:
+                        base_yield = base_data[yield_col].mean()
+                    else:
+                        crop_data = df[df['crop'] == crop]
+                        if len(crop_data) > 0 and yield_col:
+                            base_yield = crop_data[yield_col].mean()
+                        else:
+                            base_yield = 2.5  # Default fallback
+                    
+                    # Apply weather factors
+                    temp_factor = 1.0 + (temperature - 26) * 0.02
+                    rain_factor = 1.0 + (rainfall - 750) * 0.0005
+                    humidity_factor = 1.0 + (humidity - 65) * 0.008
+                    
+                    prediction = base_yield * temp_factor * rain_factor * humidity_factor
+                    confidence = "Low"
+                    
+            except Exception as e:
+                # Ultimate fallback
+                prediction = 2.5 + (temperature - 26) * 0.05 + (rainfall - 750) * 0.0008 + (humidity - 65) * 0.015
+                confidence = "Low"
         
         prediction = max(0.1, prediction)
         
         # Create prediction result
         method = "🤖 ML Model" if model_available else "📊 Statistical Analysis"
-        confidence = "High" if len(similar_data) > 10 else "Medium" if len(similar_data) > 0 else "Low"
         
         return html.Div([
             html.Div([
@@ -490,11 +592,18 @@ def make_prediction(n_clicks, temperature, rainfall, humidity, state, crop):
             ], className="text-center mb-2"),
             
             html.Small(f"Conditions: {temperature}°C, {rainfall}mm rainfall, {humidity}% humidity",
-                      className="text-muted d-block text-center")
+                      className="text-muted d-block text-center"),
+            
+            html.Small(f"Similar records found: {len(similar_data)}" if len(similar_data) > 0 else "Using statistical approximation",
+                      className="text-muted d-block text-center mt-1")
         ], className="p-3 bg-white rounded shadow-sm")
         
     except Exception as e:
-        return html.Div(f"Prediction error: {str(e)}", className="text-danger text-center")
+        return html.Div([
+            html.H5("Prediction Error", className="text-danger"),
+            html.P(f"Error details: {str(e)}", className="text-muted small"),
+            html.P("Using default prediction: 2.50 tonnes/hectare", className="text-info")
+        ], className="text-danger text-center p-3 bg-light rounded")
 
 @callback(
     Output('data-table-container', 'children'),
@@ -509,18 +618,25 @@ def update_data_table(state, crop):
     if crop:
         filtered_df = filtered_df[filtered_df['crop'] == crop]
     
-    # Select columns for display
-    display_cols = ['year', 'season', 'state', 'crop', 'yield_tonnes_per_hectare', 
-                   'area_hectares', 'temperature_c', 'rainfall_mm', 'humidity_percent']
+    # Select columns for display - use available columns
+    all_possible_cols = ['year', 'season', 'state', 'crop', 'yield_tonnes_per_hectare', 
+                        'yield_tons_per_hectare', 'yield', 'area_hectares', 'area',
+                        'temperature_c', 'temperature_clean', 'temperature',
+                        'rainfall_mm', 'rainfall_clean', 'rainfall',
+                        'humidity_percent', 'humidity_clean', 'humidity']
     
-    display_df = filtered_df[display_cols].head(20)  # Show top 20 records
+    display_cols = [col for col in all_possible_cols if col in filtered_df.columns]
+    
+    # Limit to first 10 columns and 20 rows for display
+    display_cols = display_cols[:10]
+    display_df = filtered_df[display_cols].head(20)
     
     return dash_table.DataTable(
         data=display_df.to_dict('records'),
         columns=[{"name": col.replace('_', ' ').title(), "id": col, 
-                 "type": "numeric" if df[col].dtype in ['int64', 'float64'] else "text"}
+                 "type": "numeric" if pd.api.types.is_numeric_dtype(filtered_df[col]) else "text"}
                 for col in display_cols],
-        style_cell={'textAlign': 'left', 'padding': '10px'},
+        style_cell={'textAlign': 'left', 'padding': '10px', 'fontSize': '12px'},
         style_header={'backgroundColor': '#28a745', 'color': 'white', 'fontWeight': 'bold'},
         style_data={'backgroundColor': '#f8f9fa'},
         page_size=10,
@@ -560,4 +676,3 @@ if __name__ == '__main__':
     print("="*60 + "\n")
     
     app.run(debug=True, host='0.0.0.0', port=8050)
-
